@@ -1,0 +1,143 @@
+services:
+  # ==========================================
+  # 1. POSTGRESQL RELATIONAL DATABASE
+  # ==========================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: ayojit_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-ayojit}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ayojit_secure_password_2026}
+      POSTGRES_DB: ${POSTGRES_DB:-ayojit_lms}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ayojit} -d ${POSTGRES_DB:-ayojit_lms}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ayo_network
+
+  # ==========================================
+  # 2. REDIS IN-MEMORY CACHE & LOCK LAYER
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: ayojit_redis
+    restart: unless-stopped
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf"]
+    volumes:
+      - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - ayo_network
+
+  # ==========================================
+  # 3. PYTHON PAPERFETCHER MICROSERVICE
+  # ==========================================
+  paperfetcher:
+    build:
+      context: ./paperfetcher_service
+      dockerfile: Dockerfile
+    container_name: ayojit_paperfetcher
+    restart: unless-stopped
+    environment:
+      PYTHONUNBUFFERED: "1"
+      PORT: "5000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:5000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ayo_network
+
+  # ==========================================
+  # 4. NEXT.JS ACADEMIC LMS APPLICATION
+  # ==========================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ayojit_app
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: postgresql://${POSTGRES_USER:-ayojit}:${POSTGRES_PASSWORD:-ayojit_secure_password_2026}@postgres:5432/${POSTGRES_DB:-ayojit_lms}?schema=public
+      REDIS_URL: redis://redis:6379
+      PAPERFETCHER_API_URL: http://paperfetcher:5000/api
+      JWT_SECRET: ${JWT_SECRET:-ayojit_master_jwt_secret_2026_production}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-ayojit_nextauth_secret_key_2026}
+      NEXT_PUBLIC_APP_URL: ${APP_URL:-http://localhost}
+      AUTO_SEED: ${AUTO_SEED:-true}
+      STORAGE_PROVIDER: ${STORAGE_PROVIDER:-local}
+    volumes:
+      - app_storage:/app/storage
+      - app_uploads:/app/public/uploads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      paperfetcher:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    networks:
+      - ayo_network
+
+  # ==========================================
+  # 5. NGINX REVERSE PROXY & GATEWAY
+  # ==========================================
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: ayojit_nginx
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      app:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - ayo_network
+
+# ==========================================
+# PERSISTENT VOLUMES & ISOLATED NETWORKS
+# ==========================================
+volumes:
+  postgres_data:
+    name: ayojit_postgres_data
+  redis_data:
+    name: ayojit_redis_data
+  app_storage:
+    name: ayojit_app_storage
+  app_uploads:
+    name: ayojit_app_uploads
+
+networks:
+  ayo_network:
+    name: ayojit_network
+    driver: bridge
